@@ -1,82 +1,55 @@
 import os
 import asyncio
-import time
-from collections import deque
+from datetime import datetime, timezone
 
 import aiohttp
 from aiohttp import web
 import discord
 from discord.ext import commands
 from discord import app_commands
-from mcstatus import JavaServer
 
 
-# =========================================================
-# CONFIG
-# =========================================================
+# =========================
+# ENVIRONMENT VARIABLES
+# =========================
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN")
+BRIDGE_SECRET = os.getenv("BRIDGE_SECRET")
 
-GUILD_ID = int(
-    os.getenv("GUILD_ID", "1550471340610289795")
-)
-
-MC_HOST = os.getenv(
-    "MC_HOST",
-    "95.156.225.24"
-)
-
-MC_PORT = int(
-    os.getenv("MC_PORT", "26383")
-)
-
-BEDROCK_HOST = os.getenv(
-    "BEDROCK_HOST",
-    "95.156.225.24"
-)
-
-BEDROCK_PORT = int(
-    os.getenv("BEDROCK_PORT", "29510")
-)
+GUILD_ID = int(os.getenv("GUILD_ID", "1550471340610289795"))
 
 MINE_CHAT_CHANNEL_ID = int(
-    os.getenv(
-        "MINE_CHAT_CHANNEL_ID",
-        "1552794391247192084"
-    )
+    os.getenv("MINE_CHAT_CHANNEL_ID", "1552794391247192084")
+)
+
+STATS_CHANNEL_ID = int(
+    os.getenv("STATS_CHANNEL_ID", "1552794085637488690")
 )
 
 PARTNER_PANEL_URL = os.getenv(
     "PARTNER_PANEL_URL",
     "https://panel.partner-hosting.com"
-).rstrip("/")
+)
 
 PARTNER_SERVER_ID = os.getenv(
     "PARTNER_SERVER_ID",
     "a594dd95"
 )
 
-PARTNER_API_KEY = os.getenv(
-    "PARTNER_API_KEY"
-)
+PARTNER_API_KEY = os.getenv("PARTNER_API_KEY")
 
-# Web API secret
-BRIDGE_SECRET = os.getenv(
-    "BRIDGE_SECRET",
-    "CHANGE_THIS_SECRET"
-)
+MC_HOST = os.getenv("MC_HOST", "95.156.225.24")
+MC_PORT = os.getenv("MC_PORT", "26383")
 
-# Railway PORT
-WEB_PORT = int(
-    os.getenv("PORT", "8080")
-)
+BEDROCK_HOST = os.getenv("BEDROCK_HOST", "95.156.225.24")
+BEDROCK_PORT = os.getenv("BEDROCK_PORT", "29510")
 
 
-# =========================================================
+# =========================
 # OWNERS
-# =========================================================
+# =========================
 
-OWNER_IDS = {
+OWNERS = {
     1446592341908652112,
     1476170066327371798,
     1499456366325010552,
@@ -84,12 +57,26 @@ OWNER_IDS = {
 }
 
 
-# =========================================================
-# BOT
-# =========================================================
+# =========================
+# MINECRAFT STATUS
+# =========================
+
+minecraft_status = {
+    "online": False,
+    "players": 0,
+    "max_players": 100,
+    "player_names": [],
+    "updated": None,
+}
+
+
+# =========================
+# DISCORD BOT
+# =========================
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 
 bot = commands.Bot(
     command_prefix="!",
@@ -97,36 +84,21 @@ bot = commands.Bot(
 )
 
 
-# =========================================================
-# CHAT QUEUE
-# =========================================================
+# =========================
+# HELPERS
+# =========================
 
-minecraft_queue = deque(maxlen=100)
+def owner_only(interaction: discord.Interaction) -> bool:
+    return interaction.user.id in OWNERS
 
-last_chat_message = {}
-
-
-# =========================================================
-# OWNER CHECK
-# =========================================================
-
-def is_owner(user_id: int) -> bool:
-    return user_id in OWNER_IDS
-
-
-# =========================================================
-# PARTNER HOST POWER
-# =========================================================
 
 async def partner_power(signal: str):
-
     if not PARTNER_API_KEY:
         return False, "PARTNER_API_KEY غير موجود في Railway."
 
     url = (
         f"{PARTNER_PANEL_URL}"
-        f"/api/client/servers/"
-        f"{PARTNER_SERVER_ID}/power"
+        f"/api/client/servers/{PARTNER_SERVER_ID}/power"
     )
 
     headers = {
@@ -140,300 +112,272 @@ async def partner_power(signal: str):
     }
 
     try:
+        timeout = aiohttp.ClientTimeout(total=15)
 
-        timeout = aiohttp.ClientTimeout(
-            total=15
-        )
-
-        async with aiohttp.ClientSession(
-            timeout=timeout
-        ) as session:
-
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(
                 url,
                 headers=headers,
                 json=payload
             ) as response:
 
-                body = await response.text()
-
-                print(
-                    f"[PARTNER] "
-                    f"{signal.upper()} "
-                    f"HTTP {response.status}"
-                )
-
-                if response.status in (200, 204):
+                if response.status in (200, 202, 204):
                     return True, "OK"
 
-                return False, (
-                    f"HTTP {response.status}\n"
-                    f"{body[:1000]}"
-                )
+                text = await response.text()
+                return False, f"HTTP {response.status}: {text[:300]}"
 
     except Exception as e:
-
-        print(
-            "[PARTNER ERROR]",
-            repr(e)
-        )
-
         return False, str(e)
 
 
-# =========================================================
-# MINECRAFT STATUS
-# =========================================================
+# =========================
+# WEB SERVER
+# =========================
 
-async def get_mc_status():
+async def bridge_secret_ok(request):
+    if not BRIDGE_SECRET:
+        return False
 
-    def check():
+    received = request.headers.get("X-Bridge-Secret")
 
-        server = JavaServer.lookup(
-            f"{MC_HOST}:{MC_PORT}"
+    return (
+        received is not None
+        and received == BRIDGE_SECRET
+    )
+
+
+async def minecraft_status_endpoint(request):
+    if not await bridge_secret_ok(request):
+        return web.json_response(
+            {"error": "Unauthorized"},
+            status=401
         )
-
-        status = server.status()
-
-        return {
-            "online": True,
-            "players": status.players.online,
-            "max_players": status.players.max,
-            "ping": round(status.latency),
-        }
 
     try:
+        data = await request.json()
 
-        result = await asyncio.wait_for(
-            asyncio.to_thread(check),
-            timeout=8
+        online = int(data.get("online", 0))
+        max_players = int(data.get("max", 100))
+
+        players = data.get("players", "")
+
+        if isinstance(players, list):
+            player_names = [
+                str(x)[:32]
+                for x in players
+            ]
+        else:
+            player_names = [
+                x.strip()[:32]
+                for x in str(players).split(",")
+                if x.strip()
+            ]
+
+        minecraft_status["online"] = True
+        minecraft_status["players"] = max(0, online)
+        minecraft_status["max_players"] = max(
+            1,
+            max_players
         )
+        minecraft_status["player_names"] = player_names
+        minecraft_status["updated"] = datetime.now(
+            timezone.utc
+        ).isoformat()
 
-        return result
+        return web.json_response({
+            "success": True
+        })
 
     except Exception as e:
-
-        print(
-            "[MC STATUS ERROR]",
-            repr(e)
+        return web.json_response(
+            {
+                "success": False,
+                "error": str(e)
+            },
+            status=400
         )
 
-        return {
-            "online": False,
-            "players": 0,
-            "max_players": 0,
-            "ping": 0,
-        }
 
-
-# =========================================================
-# SERVER EMBED
-# =========================================================
-
-async def create_server_embed():
-
-    status = await get_mc_status()
-
-    if status["online"]:
-
-        embed = discord.Embed(
-            title="FirstMC Network",
-            description=(
-                "```ansi\n"
-                "\u001b[1;32m🟢 SERVER ONLINE\u001b[0m\n"
-                "```"
-            ),
-            color=discord.Color.green()
+async def minecraft_pending_endpoint(request):
+    if not await bridge_secret_ok(request):
+        return web.json_response(
+            {"error": "Unauthorized"},
+            status=401
         )
 
-        embed.add_field(
-            name="👥 Players",
-            value=(
-                f"**{status['players']} / "
-                f"{status['max_players']}**"
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="⚡ Ping",
-            value=f"**{status['ping']}ms**",
-            inline=True
-        )
-
-        embed.add_field(
-            name="🎮 Version",
-            value="**1.18-1.21.11**",
-            inline=True
-        )
-
-        embed.add_field(
-            name="🌐 Java",
-            value=(
-                f"`{MC_HOST}:{MC_PORT}`"
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="🟢 Bedrock",
-            value=(
-                f"`{BEDROCK_HOST}:{BEDROCK_PORT}`"
-            ),
-            inline=False
-        )
-
-    else:
-
-        embed = discord.Embed(
-            title="FirstMC Network",
-            description=(
-                "```ansi\n"
-                "\u001b[1;31m🔴 SERVER OFFLINE\u001b[0m\n"
-                "```"
-            ),
-            color=discord.Color.red()
-        )
-
-        embed.add_field(
-            name="👥 Players",
-            value="**0 / —**",
-            inline=False
-        )
-
-        embed.add_field(
-            name="⚡ Ping",
-            value="**—**",
-            inline=True
-        )
-
-        embed.add_field(
-            name="🎮 Version",
-            value="**1.18-1.21.11**",
-            inline=True
-        )
-
-        embed.add_field(
-            name="🌐 Java",
-            value=(
-                f"`{MC_HOST}:{MC_PORT}`"
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="🟢 Bedrock",
-            value=(
-                f"`{BEDROCK_HOST}:{BEDROCK_PORT}`"
-            ),
-            inline=False
-        )
-
-    embed.set_footer(
-        text="FirstMC Network • Server Status"
+    messages = getattr(
+        minecraft_pending_endpoint,
+        "messages",
+        []
     )
 
-    return embed
+    minecraft_pending_endpoint.messages = []
+
+    return web.json_response({
+        "messages": messages
+    })
 
 
-# =========================================================
-# SERVER BUTTON
-# =========================================================
+minecraft_pending_endpoint.messages = []
 
-class ServerView(discord.ui.View):
 
-    def __init__(self):
-        super().__init__(
-            timeout=None
+async def minecraft_chat_endpoint(request):
+    if not await bridge_secret_ok(request):
+        return web.json_response(
+            {"error": "Unauthorized"},
+            status=401
         )
 
-    @discord.ui.button(
-        label="Refresh",
-        emoji="🔄",
-        style=discord.ButtonStyle.secondary,
-        custom_id="firstmc_server_refresh"
+    try:
+        data = await request.json()
+
+        player = str(
+            data.get("player", "Minecraft")
+        )[:32]
+
+        message = str(
+            data.get("message", "")
+        )[:500]
+
+        if not message.strip():
+            return web.json_response(
+                {"success": False},
+                status=400
+            )
+
+        channel = bot.get_channel(
+            MINE_CHAT_CHANNEL_ID
+        )
+
+        if channel is None:
+            return web.json_response(
+                {
+                    "success": False,
+                    "error": "Discord channel not found"
+                },
+                status=404
+            )
+
+        await channel.send(
+            f"**{player}** » {message}"
+        )
+
+        return web.json_response({
+            "success": True
+        })
+
+    except Exception as e:
+        return web.json_response(
+            {
+                "success": False,
+                "error": str(e)
+            },
+            status=400
+        )
+
+
+async def health_endpoint(request):
+    return web.json_response({
+        "status": "online",
+        "bot": str(bot.user) if bot.user else None,
+        "minecraft_online": minecraft_status["online"]
+    })
+
+
+async def start_web_server():
+    app = web.Application()
+
+    app.router.add_get(
+        "/",
+        health_endpoint
     )
-    async def refresh(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
 
-        print(
-            f"[REFRESH] "
-            f"{interaction.user} "
-            f"({interaction.user.id})"
-        )
+    app.router.add_get(
+        "/minecraft/pending",
+        minecraft_pending_endpoint
+    )
 
-        embed = await create_server_embed()
+    app.router.add_post(
+        "/minecraft/status",
+        minecraft_status_endpoint
+    )
 
-        await interaction.response.edit_message(
-            embed=embed,
-            view=self
-        )
+    app.router.add_post(
+        "/minecraft/chat",
+        minecraft_chat_endpoint
+    )
+
+    port = int(
+        os.getenv("PORT", "8080")
+    )
+
+    runner = web.AppRunner(app)
+
+    await runner.setup()
+
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        port
+    )
+
+    await site.start()
+
+    print(f"Web server listening on port {port}")
 
 
-# =========================================================
-# READY / COMMAND SYNC
-# =========================================================
+# =========================
+# DISCORD -> MINECRAFT QUEUE
+# =========================
+
+@bot.event
+async def on_message(message: discord.Message):
+
+    if message.author.bot:
+        return
+
+    if message.channel.id == MINE_CHAT_CHANNEL_ID:
+
+        text = message.content.strip()
+
+        if text:
+
+            minecraft_pending_endpoint.messages.append({
+                "player": str(message.author),
+                "message": text[:500]
+            })
+
+    await bot.process_commands(message)
+
+
+# =========================
+# READY
+# =========================
 
 @bot.event
 async def on_ready():
 
-    print("=" * 60)
+    print(f"Logged in as {bot.user}")
+
+    guild = discord.Object(id=GUILD_ID)
+
+    bot.tree.clear_commands(guild=guild)
+
+    bot.tree.copy_global_to(guild=guild)
+
+    synced = await bot.tree.sync(
+        guild=guild
+    )
+
     print(
-        f"Logged in as {bot.user} "
-        f"({bot.user.id})"
-    )
-    print("=" * 60)
-
-    guild = discord.Object(
-        id=GUILD_ID
-    )
-
-    try:
-
-        # تنظيف أوامر Guild القديمة
-        bot.tree.clear_commands(
-            guild=guild
-        )
-
-        # نسخ الأوامر الحالية
-        bot.tree.copy_global_to(
-            guild=guild
-        )
-
-        synced = await bot.tree.sync(
-            guild=guild
-        )
-
-        print(
-            f"[SYNC] {len(synced)} commands"
-        )
-
-        for command in synced:
-            print(
-                f"[SYNC] /{command.name}"
-            )
-
-        print("=" * 60)
-
-    except Exception as e:
-
-        print(
-            "[SYNC ERROR]",
-            repr(e)
-        )
-
-    # Persistent button
-    bot.add_view(
-        ServerView()
+        f"Synced {len(synced)} guild commands"
     )
 
 
-# =========================================================
+# =========================
 # /SERVER
-# =========================================================
+# =========================
 
 @bot.tree.command(
     name="server",
@@ -443,52 +387,114 @@ async def server_command(
     interaction: discord.Interaction
 ):
 
-    print(
-        f"[COMMAND] /server "
-        f"{interaction.user.id}"
+    if not minecraft_status["online"]:
+        embed = discord.Embed(
+            title="🔴 SERVER OFFLINE",
+            description=(
+                "السيرفر غير متصل حاليًا "
+                "أو لم تصل بيانات الحالة بعد."
+            ),
+            color=discord.Color.red()
+        )
+
+        embed.add_field(
+            name="🎮 Version",
+            value="1.18-1.21.11",
+            inline=False
+        )
+
+        embed.add_field(
+            name="🌐 Java",
+            value=f"`{MC_HOST}:{MC_PORT}`",
+            inline=False
+        )
+
+        embed.add_field(
+            name="🟢 Bedrock",
+            value=f"`{BEDROCK_HOST}:{BEDROCK_PORT}`",
+            inline=False
+        )
+
+        await interaction.response.send_message(
+            embed=embed
+        )
+
+        return
+
+    online = minecraft_status["players"]
+    maximum = minecraft_status["max_players"]
+
+    embed = discord.Embed(
+        title="🟢 SERVER ONLINE",
+        color=discord.Color.green()
     )
 
-    await interaction.response.defer()
+    embed.add_field(
+        name="👥 Players",
+        value=f"**{online} / {maximum}**",
+        inline=False
+    )
 
-    embed = await create_server_embed()
+    embed.add_field(
+        name="⚡ Ping",
+        value="Connected",
+        inline=False
+    )
 
-    await interaction.followup.send(
-        embed=embed,
-        view=ServerView()
+    embed.add_field(
+        name="🎮 Version",
+        value="1.18-1.21.11",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🌐 Java",
+        value=f"`{MC_HOST}:{MC_PORT}`",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🟢 Bedrock",
+        value=f"`{BEDROCK_HOST}:{BEDROCK_PORT}`",
+        inline=False
+    )
+
+    players = minecraft_status["player_names"]
+
+    if players:
+        names = "\n".join(
+            f"• {name}"
+            for name in players[:20]
+        )
+
+        embed.add_field(
+            name="👤 Online Players",
+            value=names,
+            inline=False
+        )
+
+    await interaction.response.send_message(
+        embed=embed
     )
 
 
-# =========================================================
-# POWER COMMAND
-# =========================================================
+# =========================
+# /START
+# =========================
 
-async def power_command(
-    interaction: discord.Interaction,
-    signal: str,
-    emoji: str,
-    title: str
+@bot.tree.command(
+    name="start",
+    description="تشغيل سيرفر FirstMC"
+)
+async def start_command(
+    interaction: discord.Interaction
 ):
 
-    print(
-        f"[COMMAND] /{signal} "
-        f"{interaction.user.id}"
-    )
-
-    # Owners only
-    if not is_owner(
-        interaction.user.id
-    ):
-
+    if not owner_only(interaction):
         await interaction.response.send_message(
             "❌ هذا الأمر للـOwners فقط.",
             ephemeral=True
         )
-
-        print(
-            f"[DENIED] /{signal} "
-            f"{interaction.user.id}"
-        )
-
         return
 
     await interaction.response.defer(
@@ -496,485 +502,151 @@ async def power_command(
     )
 
     success, result = await partner_power(
-        signal
+        "start"
     )
 
     if success:
-
-        embed = discord.Embed(
-            title=f"{emoji} {title}",
-            description=(
-                f"تم تنفيذ `{signal}` بنجاح."
-            ),
-            color=discord.Color.green()
-        )
-
-        embed.add_field(
-            name="Server",
-            value="`Firstmc`",
-            inline=True
-        )
-
-        embed.add_field(
-            name="Server ID",
-            value=f"`{PARTNER_SERVER_ID}`",
-            inline=True
-        )
-
         await interaction.followup.send(
-            embed=embed,
-            ephemeral=True
+            "🟢 تم إرسال أمر تشغيل السيرفر."
         )
-
     else:
-
-        embed = discord.Embed(
-            title="❌ Power Error",
-            description=(
-                "فشل تنفيذ الأمر."
-            ),
-            color=discord.Color.red()
-        )
-
-        embed.add_field(
-            name="Error",
-            value=f"```{result[:1500]}```",
-            inline=False
-        )
-
         await interaction.followup.send(
-            embed=embed,
-            ephemeral=True
+            f"❌ فشل التشغيل:\n`{result}`"
         )
 
 
-# =========================================================
-# /START
-# =========================================================
-
-@bot.tree.command(
-    name="start",
-    description="تشغيل السيرفر"
-)
-async def start_command(
-    interaction: discord.Interaction
-):
-
-    await power_command(
-        interaction,
-        "start",
-        "🟢",
-        "Starting FirstMC"
-    )
-
-
-# =========================================================
+# =========================
 # /STOP
-# =========================================================
+# =========================
 
 @bot.tree.command(
     name="stop",
-    description="إيقاف السيرفر"
+    description="إيقاف سيرفر FirstMC"
 )
 async def stop_command(
     interaction: discord.Interaction
 ):
 
-    await power_command(
-        interaction,
-        "stop",
-        "🔴",
-        "Stopping FirstMC"
+    if not owner_only(interaction):
+        await interaction.response.send_message(
+            "❌ هذا الأمر للـOwners فقط.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(
+        ephemeral=True
     )
 
+    success, result = await partner_power(
+        "stop"
+    )
 
-# =========================================================
+    if success:
+        await interaction.followup.send(
+            "🔴 تم إرسال أمر إيقاف السيرفر."
+        )
+    else:
+        await interaction.followup.send(
+            f"❌ فشل الإيقاف:\n`{result}`"
+        )
+
+
+# =========================
 # /RESTART
-# =========================================================
+# =========================
 
 @bot.tree.command(
     name="restart",
-    description="إعادة تشغيل السيرفر"
+    description="إعادة تشغيل سيرفر FirstMC"
 )
 async def restart_command(
     interaction: discord.Interaction
 ):
 
-    await power_command(
-        interaction,
-        "restart",
-        "🔄",
-        "Restarting FirstMC"
-    )
-
-
-# =========================================================
-# /CHAT-MINECRAFT
-# =========================================================
-
-@bot.tree.command(
-    name="chat-minecraft",
-    description="تحديد روم شات Minecraft"
-)
-async def chat_minecraft_command(
-    interaction: discord.Interaction
-):
-
-    global MINE_CHAT_CHANNEL_ID
-
-    print(
-        f"[COMMAND] /chat-minecraft "
-        f"{interaction.user.id}"
-    )
-
-    if not is_owner(
-        interaction.user.id
-    ):
-
+    if not owner_only(interaction):
         await interaction.response.send_message(
             "❌ هذا الأمر للـOwners فقط.",
             ephemeral=True
         )
-
         return
 
-    MINE_CHAT_CHANNEL_ID = (
-        interaction.channel_id
+    await interaction.response.defer(
+        ephemeral=True
     )
 
-    await interaction.response.send_message(
-        "✅ تم تفعيل Minecraft Chat هنا."
+    success, result = await partner_power(
+        "restart"
     )
 
-    print(
-        f"[CHAT] Channel = "
-        f"{MINE_CHAT_CHANNEL_ID}"
-    )
+    if success:
+        await interaction.followup.send(
+            "🔄 تم إرسال أمر إعادة تشغيل السيرفر."
+        )
+    else:
+        await interaction.followup.send(
+            f"❌ فشل إعادة التشغيل:\n`{result}`"
+        )
 
 
-# =========================================================
-# DISCORD → MINECRAFT
-# =========================================================
+# =========================
+# /CHAT-MINECRAFT
+# =========================
 
-@bot.event
-async def on_message(
-    message: discord.Message
+@bot.tree.command(
+    name="chat-minecraft",
+    description="إرسال رسالة إلى Minecraft"
+)
+@app_commands.describe(
+    message="الرسالة التي تريد إرسالها"
+)
+async def chat_minecraft_command(
+    interaction: discord.Interaction,
+    message: str
 ):
 
-    # لا نتعامل مع رسائل البوتات
-    if message.author.bot:
+    if not owner_only(interaction):
+        await interaction.response.send_message(
+            "❌ هذا الأمر للـOwners فقط.",
+            ephemeral=True
+        )
         return
 
-    # Discord Chat → Minecraft
-    if (
-        message.channel.id
-        == MINE_CHAT_CHANNEL_ID
-    ):
-
-        content = message.content.strip()
-
-        if content:
-
-            minecraft_queue.append({
-                "author": message.author.display_name,
-                "message": content,
-                "timestamp": int(time.time())
-            })
-
-            print(
-                f"[DISCORD -> MC] "
-                f"{message.author.display_name}: "
-                f"{content}"
-            )
-
-    await bot.process_commands(
-        message
-    )
-
-
-# =========================================================
-# API AUTH
-# =========================================================
-
-def check_bridge_secret(request):
-
-    provided = request.headers.get(
-        "X-Bridge-Secret"
-    )
-
-    return (
-        provided
-        and BRIDGE_SECRET
-        and provided == BRIDGE_SECRET
-    )
-
-
-# =========================================================
-# GET PENDING DISCORD MESSAGES
-# Minecraft plugin calls this
-# =========================================================
-
-async def api_pending(request):
-
-    if not check_bridge_secret(request):
-
-        return web.json_response(
-            {
-                "error": "unauthorized"
-            },
-            status=401
-        )
-
-    messages = []
-
-    while minecraft_queue:
-
-        messages.append(
-            minecraft_queue.popleft()
-        )
-
-    return web.json_response({
-        "messages": messages
-    })
-
-
-# =========================================================
-# MC → DISCORD
-# Minecraft plugin sends chat here
-# =========================================================
-
-async def api_minecraft_chat(request):
-
-    if not check_bridge_secret(request):
-
-        return web.json_response(
-            {
-                "error": "unauthorized"
-            },
-            status=401
-        )
-
-    try:
-
-        data = await request.json()
-
-    except Exception:
-
-        return web.json_response(
-            {
-                "error": "invalid_json"
-            },
-            status=400
-        )
-
-    player = str(
-        data.get(
-            "player",
-            "Minecraft"
-        )
-    ).strip()
-
-    message = str(
-        data.get(
-            "message",
-            ""
-        )
-    ).strip()
+    message = message.strip()[:500]
 
     if not message:
-
-        return web.json_response(
-            {
-                "error": "empty_message"
-            },
-            status=400
+        await interaction.response.send_message(
+            "❌ الرسالة فارغة.",
+            ephemeral=True
         )
+        return
 
-    channel = bot.get_channel(
-        MINE_CHAT_CHANNEL_ID
-    )
-
-    if channel is None:
-
-        try:
-
-            channel = await bot.fetch_channel(
-                MINE_CHAT_CHANNEL_ID
-            )
-
-        except Exception as e:
-
-            print(
-                "[MC -> DISCORD] "
-                "Channel error:",
-                repr(e)
-            )
-
-            return web.json_response(
-                {
-                    "error": "channel_not_found"
-                },
-                status=404
-            )
-
-    try:
-
-        await channel.send(
-            f"**{player}** » {message}"
-        )
-
-        print(
-            f"[MC -> DISCORD] "
-            f"{player}: {message}"
-        )
-
-        return web.json_response({
-            "success": True
-        })
-
-    except Exception as e:
-
-        print(
-            "[MC -> DISCORD ERROR]",
-            repr(e)
-        )
-
-        return web.json_response(
-            {
-                "error": str(e)
-            },
-            status=500
-        )
-
-
-# =========================================================
-# API STATUS
-# =========================================================
-
-async def api_status(request):
-
-    return web.json_response({
-        "bot": "online",
-        "server_id": PARTNER_SERVER_ID,
-        "minecraft": f"{MC_HOST}:{MC_PORT}",
-        "bedrock": f"{BEDROCK_HOST}:{BEDROCK_PORT}"
+    minecraft_pending_endpoint.messages.append({
+        "player": str(interaction.user),
+        "message": message
     })
 
-
-# =========================================================
-# WEB SERVER
-# =========================================================
-
-async def start_web_server():
-
-    app = web.Application()
-
-    app.router.add_get(
-        "/",
-        api_status
-    )
-
-    app.router.add_get(
-        "/minecraft/pending",
-        api_pending
-    )
-
-    app.router.add_post(
-        "/minecraft/chat",
-        api_minecraft_chat
-    )
-
-    runner = web.AppRunner(
-        app
-    )
-
-    await runner.setup()
-
-    site = web.TCPSite(
-        runner,
-        "0.0.0.0",
-        WEB_PORT
-    )
-
-    await site.start()
-
-    print(
-        f"[WEB] Listening on port "
-        f"{WEB_PORT}"
+    await interaction.response.send_message(
+        "✅ تم إرسال الرسالة إلى Minecraft.",
+        ephemeral=True
     )
 
 
-# =========================================================
-# COMMAND ERROR
-# =========================================================
-
-@bot.tree.error
-async def command_error(
-    interaction: discord.Interaction,
-    error: app_commands.AppCommandError
-):
-
-    print(
-        "[COMMAND ERROR]",
-        repr(error)
-    )
-
-    try:
-
-        text = (
-            "❌ حدث خطأ:\n"
-            f"`{str(error)[:1000]}`"
-        )
-
-        if interaction.response.is_done():
-
-            await interaction.followup.send(
-                text,
-                ephemeral=True
-            )
-
-        else:
-
-            await interaction.response.send_message(
-                text,
-                ephemeral=True
-            )
-
-    except Exception as e:
-
-        print(
-            "[ERROR HANDLER ERROR]",
-            repr(e)
-        )
-
-
-# =========================================================
+# =========================
 # START
-# =========================================================
+# =========================
 
 async def main():
 
-    if not DISCORD_TOKEN:
-
+    if not TOKEN:
         raise RuntimeError(
-            "DISCORD_TOKEN غير موجود."
-        )
-
-    if not PARTNER_API_KEY:
-
-        raise RuntimeError(
-            "PARTNER_API_KEY غير موجود."
+            "DISCORD_TOKEN غير موجود في Railway Variables."
         )
 
     await start_web_server()
 
-    await bot.start(
-        DISCORD_TOKEN
-    )
+    await bot.start(TOKEN)
 
 
 if __name__ == "__main__":
-
-    asyncio.run(
-        main()
-    )
+    asyncio.run(main())
