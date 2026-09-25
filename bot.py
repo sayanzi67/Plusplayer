@@ -9,18 +9,29 @@ from mcstatus import JavaServer
 
 
 # =========================================================
-# ENV
+# SETTINGS
 # =========================================================
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-GUILD_ID = int(os.getenv("GUILD_ID", "1550471340610289795"))
+GUILD_ID = int(
+    os.getenv("GUILD_ID", "1550471340610289795")
+)
 
-MC_HOST = os.getenv("MC_HOST", "95.156.225.24")
-MC_PORT = int(os.getenv("MC_PORT", "26383"))
+MC_HOST = os.getenv(
+    "MC_HOST",
+    "95.156.225.24"
+)
+
+MC_PORT = int(
+    os.getenv("MC_PORT", "26383")
+)
 
 MINE_CHAT_CHANNEL_ID = int(
-    os.getenv("MINE_CHAT_CHANNEL_ID", "1552794391247192084")
+    os.getenv(
+        "MINE_CHAT_CHANNEL_ID",
+        "1552794391247192084"
+    )
 )
 
 PARTNER_PANEL_URL = os.getenv(
@@ -33,11 +44,13 @@ PARTNER_SERVER_ID = os.getenv(
     "a594dd95"
 )
 
-PARTNER_API_KEY = os.getenv("PARTNER_API_KEY")
+PARTNER_API_KEY = os.getenv(
+    "PARTNER_API_KEY"
+)
 
 
 # =========================================================
-# OWNER IDS
+# OWNERS
 # =========================================================
 
 OWNER_IDS = {
@@ -49,7 +62,7 @@ OWNER_IDS = {
 
 
 # =========================================================
-# DISCORD
+# DISCORD BOT
 # =========================================================
 
 intents = discord.Intents.default()
@@ -62,7 +75,7 @@ bot = commands.Bot(
 
 
 # =========================================================
-# CHECK OWNER
+# OWNER CHECK
 # =========================================================
 
 def is_owner(user_id: int) -> bool:
@@ -74,19 +87,14 @@ def is_owner(user_id: int) -> bool:
 # =========================================================
 
 async def partner_power(signal: str):
-    """
-    signal:
-    start
-    stop
-    restart
-    """
 
     if not PARTNER_API_KEY:
-        return False, "PARTNER_API_KEY غير موجود في Railway Variables."
+        return False, "PARTNER_API_KEY غير موجود."
 
     url = (
         f"{PARTNER_PANEL_URL}"
-        f"/api/client/servers/{PARTNER_SERVER_ID}/power"
+        f"/api/client/servers/"
+        f"{PARTNER_SERVER_ID}/power"
     )
 
     headers = {
@@ -100,9 +108,14 @@ async def partner_power(signal: str):
     }
 
     try:
-        timeout = aiohttp.ClientTimeout(total=15)
 
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        timeout = aiohttp.ClientTimeout(
+            total=15
+        )
+
+        async with aiohttp.ClientSession(
+            timeout=timeout
+        ) as session:
 
             async with session.post(
                 url,
@@ -110,10 +123,11 @@ async def partner_power(signal: str):
                 json=payload
             ) as response:
 
-                text = await response.text()
+                response_text = await response.text()
 
                 print(
-                    f"[PARTNER API] {signal.upper()} "
+                    f"[PARTNER API] "
+                    f"{signal.upper()} "
                     f"HTTP {response.status}"
                 )
 
@@ -122,21 +136,26 @@ async def partner_power(signal: str):
 
                 return False, (
                     f"HTTP {response.status}\n"
-                    f"{text[:1000]}"
+                    f"{response_text[:1000]}"
                 )
 
     except Exception as e:
-        print(f"[PARTNER API ERROR] {e}")
+
+        print(
+            f"[PARTNER API ERROR] {repr(e)}"
+        )
+
         return False, str(e)
 
 
 # =========================================================
-# MC SERVER STATUS
+# MINECRAFT STATUS
 # =========================================================
 
-async def get_server_status():
+async def get_minecraft_status():
 
-    def check():
+    def get_status():
+
         server = JavaServer.lookup(
             f"{MC_HOST}:{MC_PORT}"
         )
@@ -154,7 +173,7 @@ async def get_server_status():
     try:
 
         result = await asyncio.wait_for(
-            asyncio.to_thread(check),
+            asyncio.to_thread(get_status),
             timeout=8
         )
 
@@ -162,7 +181,9 @@ async def get_server_status():
 
     except Exception as e:
 
-        print(f"[MC STATUS ERROR] {e}")
+        print(
+            f"[MC STATUS ERROR] {repr(e)}"
+        )
 
         return {
             "online": False,
@@ -174,62 +195,88 @@ async def get_server_status():
 
 
 # =========================================================
-# READY
+# BOT READY + SLASH COMMAND SYNC
 # =========================================================
 
 @bot.event
 async def on_ready():
 
-    print("=" * 50)
-    print(f"Logged in as {bot.user}")
+    print("")
+    print("=" * 60)
+    print(f"Logged in as: {bot.user}")
+    print(f"Bot ID: {bot.user.id}")
     print(f"Guild ID: {GUILD_ID}")
-    print("=" * 50)
+    print("=" * 60)
 
-    guild = discord.Object(id=GUILD_ID)
+    guild = discord.Object(
+        id=GUILD_ID
+    )
 
     try:
 
-        # تسجيل أوامر هذا البوت داخل السيرفر مباشرة
+        # نحذف أوامر Guild القديمة
+        bot.tree.clear_commands(
+            guild=guild
+        )
+
+        # ننسخ أوامر الكود الحالية إلى Guild
+        bot.tree.copy_global_to(
+            guild=guild
+        )
+
+        # نسجلها مباشرة في السيرفر
         synced = await bot.tree.sync(
             guild=guild
         )
 
+        print("")
         print(
-            f"Synced {len(synced)} guild commands:"
+            f"SUCCESS: Synced "
+            f"{len(synced)} commands"
         )
 
         for command in synced:
-            print(f"  /{command.name}")
+            print(
+                f"  /{command.name}"
+            )
+
+        print("")
+        print("=" * 60)
 
     except Exception as e:
 
+        print("")
         print(
-            f"[SYNC ERROR] {type(e).__name__}: {e}"
+            "[COMMAND SYNC ERROR]"
         )
+        print(
+            repr(e)
+        )
+        print("")
+        print("=" * 60)
 
 
 # =========================================================
-# /SERVER
+# /server
 # =========================================================
 
 @bot.tree.command(
     name="server",
     description="عرض حالة سيرفر Minecraft"
 )
-@app_commands.guilds(discord.Object(id=GUILD_ID))
 async def server_command(
     interaction: discord.Interaction
 ):
 
     print(
         f"[COMMAND] /server "
-        f"by {interaction.user} "
+        f"-> {interaction.user} "
         f"({interaction.user.id})"
     )
 
     await interaction.response.defer()
 
-    status = await get_server_status()
+    status = await get_minecraft_status()
 
     if status["online"]:
 
@@ -268,7 +315,9 @@ async def server_command(
 
         embed.add_field(
             name="🌐 Java",
-            value=f"`{MC_HOST}:{MC_PORT}`",
+            value=(
+                f"`{MC_HOST}:{MC_PORT}`"
+            ),
             inline=False
         )
 
@@ -288,7 +337,9 @@ async def server_command(
 
         embed.add_field(
             name="🌐 Java",
-            value=f"`{MC_HOST}:{MC_PORT}`",
+            value=(
+                f"`{MC_HOST}:{MC_PORT}`"
+            ),
             inline=False
         )
 
@@ -298,10 +349,10 @@ async def server_command(
 
 
 # =========================================================
-# POWER COMMAND HELPER
+# POWER COMMAND
 # =========================================================
 
-async def power_command(
+async def execute_power_command(
     interaction: discord.Interaction,
     signal: str,
     emoji: str,
@@ -310,12 +361,14 @@ async def power_command(
 
     print(
         f"[COMMAND] /{signal} "
-        f"by {interaction.user} "
+        f"-> {interaction.user} "
         f"({interaction.user.id})"
     )
 
-    # Owner check
-    if not is_owner(interaction.user.id):
+    # صلاحية المالك
+    if not is_owner(
+        interaction.user.id
+    ):
 
         await interaction.response.send_message(
             "❌ ليس لديك صلاحية استخدام هذا الأمر.",
@@ -323,13 +376,12 @@ async def power_command(
         )
 
         print(
-            f"[DENIED] {interaction.user} "
-            f"tried /{signal}"
+            f"[DENIED] {interaction.user.id}"
         )
 
         return
 
-    # لازم نرد بسرعة
+    # نرد مباشرة حتى لا يحصل Interaction Timeout
     await interaction.response.defer(
         ephemeral=True
     )
@@ -343,16 +395,22 @@ async def power_command(
         embed = discord.Embed(
             title=f"{emoji} {title}",
             description=(
-                f"تم إرسال أمر **{signal}** "
-                f"إلى سيرفر FirstMC."
+                f"تم إرسال أمر "
+                f"`{signal}` بنجاح إلى السيرفر."
             ),
             color=discord.Color.green()
         )
 
         embed.add_field(
+            name="Server",
+            value="`Firstmc`",
+            inline=True
+        )
+
+        embed.add_field(
             name="Server ID",
             value=f"`{PARTNER_SERVER_ID}`",
-            inline=False
+            inline=True
         )
 
         await interaction.followup.send(
@@ -363,15 +421,12 @@ async def power_command(
     else:
 
         embed = discord.Embed(
-            title="❌ حدث خطأ",
-            description=(
-                "لم أستطع تنفيذ الأمر."
-            ),
+            title="❌ فشل تنفيذ الأمر",
             color=discord.Color.red()
         )
 
         embed.add_field(
-            name="التفاصيل",
+            name="الخطأ",
             value=f"```{result[:1500]}```",
             inline=False
         )
@@ -383,88 +438,85 @@ async def power_command(
 
 
 # =========================================================
-# /START
+# /start
 # =========================================================
 
 @bot.tree.command(
     name="start",
     description="تشغيل سيرفر Minecraft"
 )
-@app_commands.guilds(discord.Object(id=GUILD_ID))
 async def start_command(
     interaction: discord.Interaction
 ):
 
-    await power_command(
+    await execute_power_command(
         interaction,
         "start",
         "🟢",
-        "Starting Server"
+        "Starting FirstMC"
     )
 
 
 # =========================================================
-# /STOP
+# /stop
 # =========================================================
 
 @bot.tree.command(
     name="stop",
     description="إيقاف سيرفر Minecraft"
 )
-@app_commands.guilds(discord.Object(id=GUILD_ID))
 async def stop_command(
     interaction: discord.Interaction
 ):
 
-    await power_command(
+    await execute_power_command(
         interaction,
         "stop",
         "🔴",
-        "Stopping Server"
+        "Stopping FirstMC"
     )
 
 
 # =========================================================
-# /RESTART
+# /restart
 # =========================================================
 
 @bot.tree.command(
     name="restart",
     description="إعادة تشغيل سيرفر Minecraft"
 )
-@app_commands.guilds(discord.Object(id=GUILD_ID))
 async def restart_command(
     interaction: discord.Interaction
 ):
 
-    await power_command(
+    await execute_power_command(
         interaction,
         "restart",
         "🔄",
-        "Restarting Server"
+        "Restarting FirstMC"
     )
 
 
 # =========================================================
-# /CHAT-MINECRAFT
+# /chat-minecraft
 # =========================================================
 
 @bot.tree.command(
     name="chat-minecraft",
-    description="تحديد روم ربط Discord مع Minecraft"
+    description="تحديد روم Minecraft Chat"
 )
-@app_commands.guilds(discord.Object(id=GUILD_ID))
 async def chat_minecraft_command(
     interaction: discord.Interaction
 ):
 
     print(
         f"[COMMAND] /chat-minecraft "
-        f"by {interaction.user} "
-        f"({interaction.user.id})"
+        f"-> {interaction.user}"
     )
 
-    if not is_owner(interaction.user.id):
+    if not is_owner(
+        interaction.user.id
+    ):
 
         await interaction.response.send_message(
             "❌ ليس لديك صلاحية استخدام هذا الأمر.",
@@ -475,15 +527,18 @@ async def chat_minecraft_command(
 
     global MINE_CHAT_CHANNEL_ID
 
-    MINE_CHAT_CHANNEL_ID = interaction.channel_id
+    MINE_CHAT_CHANNEL_ID = (
+        interaction.channel_id
+    )
 
     await interaction.response.send_message(
-        f"✅ تم تحديد هذا الروم كـ Minecraft Chat.\n"
+        "✅ تم تحديد هذا الروم "
+        "كروم Minecraft Chat.\n\n"
         f"Channel ID: `{interaction.channel_id}`"
     )
 
     print(
-        f"[CHAT] Minecraft channel set to "
+        f"[CHAT CHANNEL] "
         f"{interaction.channel_id}"
     )
 
@@ -493,42 +548,51 @@ async def chat_minecraft_command(
 # =========================================================
 
 @bot.tree.error
-async def on_app_command_error(
+async def command_error(
     interaction: discord.Interaction,
     error: app_commands.AppCommandError
 ):
 
+    print("")
     print(
-        "[COMMAND ERROR]",
+        "[SLASH COMMAND ERROR]"
+    )
+    print(
         repr(error)
     )
+    print("")
 
     try:
+
+        message = (
+            "❌ حدث خطأ أثناء تنفيذ الأمر.\n"
+            f"`{str(error)[:1000]}`"
+        )
 
         if interaction.response.is_done():
 
             await interaction.followup.send(
-                f"❌ حدث خطأ:\n`{str(error)[:1000]}`",
+                message,
                 ephemeral=True
             )
 
         else:
 
             await interaction.response.send_message(
-                f"❌ حدث خطأ:\n`{str(error)[:1000]}`",
+                message,
                 ephemeral=True
             )
 
     except Exception as e:
 
         print(
-            "[ERROR HANDLER FAILED]",
+            "[ERROR HANDLER ERROR]",
             repr(e)
         )
 
 
 # =========================================================
-# GLOBAL ERROR
+# DISCORD GLOBAL ERROR
 # =========================================================
 
 @bot.event
@@ -541,14 +605,14 @@ async def on_error(
     import traceback
 
     print(
-        f"[GLOBAL ERROR] Event: {event}"
+        f"[GLOBAL ERROR] {event}"
     )
 
     traceback.print_exc()
 
 
 # =========================================================
-# START
+# START BOT
 # =========================================================
 
 if not DISCORD_TOKEN:
@@ -557,6 +621,12 @@ if not DISCORD_TOKEN:
         "DISCORD_TOKEN غير موجود في Railway Variables."
     )
 
-print("Starting FirstMC Bot...")
 
-bot.run(DISCORD_TOKEN)
+print("")
+print("Starting FirstMC Bot...")
+print("")
+
+
+bot.run(
+    DISCORD_TOKEN
+)
